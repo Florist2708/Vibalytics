@@ -25,6 +25,9 @@ config.yaml
 scripts/agent.log
 scripts/audit_report.md
 
+# Runtime artifacts
+backend/Rplots.pdf
+
 # Editor / OS
 .DS_Store
 *.swp
