@@ -1,0 +1,33 @@
+# Project instructions (dev notes, roadmap — not for public)
+CLAUDE.md
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# User data & database
+data/
+
+# User config (agent command, language, etc.)
+config.yaml
+
+# Runtime temp dirs
+/tmp/vibalytics_*
+
+# Logs
+scripts/agent.log
+scripts/audit_report.md
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

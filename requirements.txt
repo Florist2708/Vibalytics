@@ -1,0 +1,9 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+pyyaml>=6.0
+pypdf>=3.0
+# Python execution support (optional — only needed when language: python in config.yaml)
+pandas>=2.0
+matplotlib>=3.7
+numpy>=1.24
