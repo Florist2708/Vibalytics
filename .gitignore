@@ -27,6 +27,7 @@ scripts/audit_report.md
 
 # Runtime artifacts
 backend/Rplots.pdf
+scripts/check-and-continue.sh
 
 # Editor / OS
 .DS_Store
