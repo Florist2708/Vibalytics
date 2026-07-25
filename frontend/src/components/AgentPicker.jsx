@@ -18,16 +18,22 @@ export default function AgentPicker({ config, onConfigChange }) {
 
   const presets       = config?.presets || []
   const currentCmd    = config?.command  || 'claude -p'
+  const modelOptions  = config?.model_options || []
+  const currentModel  = config?.model || ''
   const currentEffort = config?.effort   || ''
   const currentPreset = config?.preset_id || 'custom'
+  const supportsModel  = modelOptions.length > 0
   const supportsEffort = currentCmd.includes('claude') || currentCmd.includes('codex')
 
   // Label shown in header button
   const agentLabel = currentPreset === 'custom'
     ? currentCmd
     : (presets.find(p => p.id === currentPreset)?.label ?? currentCmd)
+  const modelLabel = currentModel
+    ? ` · ${modelOptions.find(m => m.value === currentModel)?.label ?? currentModel}`
+    : ''
   const effortLabel = currentEffort ? ` · ${currentEffort}` : ''
-  const btnLabel = agentLabel + effortLabel
+  const btnLabel = agentLabel + modelLabel + effortLabel
 
   // Close on outside click
   useEffect(() => {
@@ -51,9 +57,13 @@ export default function AgentPicker({ config, onConfigChange }) {
   }
 
   async function selectPreset(command) {
-    await save({ command })
+    await save({ command, model: '' })
     setCustomCmd('')
     setOpen(false)
+  }
+
+  async function selectModel(value) {
+    await save({ model: value })
   }
 
   async function selectEffort(value) {
@@ -65,7 +75,7 @@ export default function AgentPicker({ config, onConfigChange }) {
       <button
         className="agent-picker-btn"
         onClick={() => setOpen(v => !v)}
-        title="Agent &amp; effort settings"
+        title="Agent, model &amp; effort settings"
       >
         {btnLabel} ▾
       </button>
@@ -104,6 +114,25 @@ export default function AgentPicker({ config, onConfigChange }) {
               {saving ? '…' : 'Set'}
             </button>
           </div>
+
+          {/* ── Model section ── */}
+          <div className="agent-picker-divider" />
+          <div className={`agent-picker-label${!supportsModel ? ' agent-picker-label-dim' : ''}`}>
+            Model {!supportsModel && <span className="agent-effort-unsupported">(use the command)</span>}
+          </div>
+
+          {modelOptions.map(opt => (
+            <button
+              key={opt.value}
+              className={`agent-picker-option${currentModel === opt.value ? ' active' : ''}`}
+              onClick={() => selectModel(opt.value)}
+              disabled={saving}
+              title={opt.value ? `--model ${opt.value}` : 'CLI/account default'}
+            >
+              <span className="agent-option-label">{opt.label}</span>
+              {currentModel === opt.value && <span className="agent-option-check">✓</span>}
+            </button>
+          ))}
 
           {/* ── Effort section ── */}
           <div className="agent-picker-divider" />

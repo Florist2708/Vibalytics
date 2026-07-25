@@ -1168,6 +1168,23 @@ AGENT_PRESETS = [
     {"id": "ollama",  "label": "Ollama (ollama run …)",    "command": "ollama run llama3"},
 ]
 
+MODEL_OPTIONS = {
+    "claude": [
+        {"value": "",       "label": "Default"},
+        {"value": "best",   "label": "Best available"},
+        {"value": "fable",  "label": "Fable (latest)"},
+        {"value": "opus",   "label": "Opus (latest)"},
+        {"value": "sonnet", "label": "Sonnet (latest)"},
+        {"value": "haiku",  "label": "Haiku (latest)"},
+    ],
+    "codex": [
+        {"value": "",              "label": "Default"},
+        {"value": "gpt-5.6-sol",   "label": "GPT-5.6 Sol"},
+        {"value": "gpt-5.6-terra", "label": "GPT-5.6 Terra"},
+        {"value": "gpt-5.6-luna",  "label": "GPT-5.6 Luna"},
+    ],
+}
+
 
 _EFFORT_LEVELS = ("low", "medium", "high", "max")
 
@@ -1177,6 +1194,7 @@ def get_config():
     cfg = load_config()
     command = cfg.get("command", "claude -p")
     effort  = cfg.get("effort", "") or ""
+    model   = cfg.get("model", "") or ""
     preset_id = next(
         (p["id"] for p in AGENT_PRESETS if p["command"] == command),
         "custom",
@@ -1186,6 +1204,8 @@ def get_config():
         "language":      cfg.get("language", "r"),
         "preset_id":     preset_id,
         "presets":       AGENT_PRESETS,
+        "model":         model,
+        "model_options": MODEL_OPTIONS.get(_detect_agent(command), []),
         "effort":        effort,
         "effort_levels": list(_EFFORT_LEVELS),
     }
@@ -1193,6 +1213,7 @@ def get_config():
 
 class PatchConfigRequest(BaseModel):
     command: str | None = None
+    model:   str | None = None
     effort:  str | None = None
 
 
@@ -1210,6 +1231,9 @@ def patch_config(req: PatchConfigRequest):
         if not command:
             raise HTTPException(400, "command must not be empty")
         existing["agent"]["command"] = command
+
+    if req.model is not None:
+        existing["agent"]["model"] = req.model.strip()
 
     if req.effort is not None:
         effort = req.effort.strip().lower()

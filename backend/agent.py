@@ -18,6 +18,7 @@ from pathlib import Path
 
 DEFAULT_CONFIG: dict = {
     "command": "claude -p",
+    "model": "",                 # empty = use the CLI/account default
     "code_fence": "",          # empty = derive from language
     "language": "r",           # "r" or "python"
     "timeout": 60,
@@ -265,9 +266,13 @@ async def stream_agent(
     cmd = config["command"].split()
 
     args = list(cmd)
+    binary = cmd[0]
+    model = (config.get("model") or "").strip()
+    if model and ("claude" in binary or "codex" in binary):
+        args += ["--model", model]
+
     effort = (config.get("effort") or "").strip().lower()
     if effort in _EFFORT_LEVELS:
-        binary = cmd[0]
         if "claude" in binary:
             args += ["--effort", effort]
         elif "codex" in binary:
