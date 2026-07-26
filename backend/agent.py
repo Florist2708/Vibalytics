@@ -12,6 +12,7 @@ The "bring your own agent" contract:
 
 import asyncio
 import re
+import shlex
 import yaml
 from pathlib import Path
 
@@ -22,6 +23,7 @@ DEFAULT_CONFIG: dict = {
     "code_fence": "",          # empty = derive from language
     "language": "r",           # "r" or "python"
     "timeout": 60,
+    "agent_timeout": 300,      # hard limit for one CLI agent invocation
     "history_messages": 20,   # how many chat messages to include in prompt (10 exchanges)
     "effort": "",              # "" = no flag; "low"/"medium"/"high"/"max" for --effort (Claude only)
 }
@@ -42,7 +44,11 @@ def load_config() -> dict:
 
 def _detect_agent(command: str) -> str:
     """Return 'claude', 'codex', or 'other' from the CLI command string."""
-    cmd0 = command.strip().split()[0] if command.strip() else ""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = []
+    cmd0 = parts[0] if parts else ""
     if "claude" in cmd0:
         return "claude"
     if "codex" in cmd0:
@@ -257,16 +263,22 @@ async def stream_agent(
 ):
     """
     Async generator — yields raw text chunks from the CLI agent's stdout.
-    Raises RuntimeError on failure.  No timeout — runs until done or until
-    abort_event is set, which kills the subprocess and returns cleanly.
+    Raises RuntimeError on failure or timeout.  abort_event kills the subprocess
+    and returns cleanly.
 
     attachment_paths — list of local file paths to pass as --file flags.
     abort_event      — asyncio.Event; set it from outside to stop the agent.
     """
-    cmd = config["command"].split()
+    command = str(config.get("command") or "").strip()
+    try:
+        cmd = shlex.split(command)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid CLI agent command: {exc}") from None
+    if not cmd:
+        raise RuntimeError("CLI agent command is empty.")
 
     args = list(cmd)
-    binary = cmd[0]
+    binary = cmd[0].lower()
     model = (config.get("model") or "").strip()
     if model and ("claude" in binary or "codex" in binary):
         args += ["--model", model]
@@ -293,32 +305,85 @@ async def stream_agent(
         raise RuntimeError(
             f"CLI agent '{cmd[0]}' not found. "
             "Check the 'command' setting in config.yaml."
-        )
+        ) from None
 
+    async def _drain_stderr(limit: int = 65536) -> tuple[bytes, bool]:
+        """Drain stderr concurrently so a noisy child cannot deadlock."""
+        captured = bytearray()
+        truncated = False
+        while True:
+            chunk = await proc.stderr.read(4096)
+            if not chunk:
+                break
+            room = limit - len(captured)
+            if room > 0:
+                captured.extend(chunk[:room])
+            if len(chunk) > room:
+                truncated = True
+        return bytes(captured), truncated
+
+    try:
+        agent_timeout = float(config.get("agent_timeout", 300))
+    except (TypeError, ValueError):
+        agent_timeout = 300.0
+    if agent_timeout <= 0:
+        agent_timeout = 300.0
+
+    stderr_task = asyncio.create_task(_drain_stderr())
+    deadline = asyncio.get_running_loop().time() + agent_timeout
     aborted = False
-    while True:
-        if abort_event and abort_event.is_set():
-            aborted = True
-            proc.kill()
-            break
+    timed_out = False
+    stdout_closed = False
 
-        try:
-            chunk = await asyncio.wait_for(proc.stdout.read(512), timeout=0.5)
-        except asyncio.TimeoutError:
-            continue   # poll abort_event again
+    try:
+        while True:
+            if abort_event and abort_event.is_set():
+                aborted = True
+                break
 
-        if not chunk:
-            break
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                timed_out = True
+                break
 
-        yield chunk.decode("utf-8", errors="replace")
+            try:
+                chunk = await asyncio.wait_for(
+                    proc.stdout.read(512),
+                    timeout=min(0.5, remaining),
+                )
+            except asyncio.TimeoutError:
+                continue
 
-    await proc.wait()
+            if not chunk:
+                stdout_closed = True
+                break
 
-    if not aborted and proc.returncode not in (0, None):
-        stderr = await proc.stderr.read()
-        msg = stderr.decode().strip()
-        if msg:
-            raise RuntimeError(f"Agent error: {msg}")
+            yield chunk.decode("utf-8", errors="replace")
+    finally:
+        if stdout_closed and proc.returncode is None:
+            remaining = max(0, deadline - asyncio.get_running_loop().time())
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                timed_out = True
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        await proc.wait()
+        stderr, stderr_truncated = await stderr_task
+
+    if aborted:
+        return
+    if timed_out:
+        raise RuntimeError(f"Agent timed out after {agent_timeout:g} seconds")
+    if proc.returncode not in (0, None):
+        msg = stderr.decode("utf-8", errors="replace").strip()
+        if stderr_truncated:
+            msg += "\n[stderr truncated]"
+        detail = msg or f"process exited with code {proc.returncode}"
+        raise RuntimeError(f"Agent error: {detail}")
 
 
 async def call_agent(

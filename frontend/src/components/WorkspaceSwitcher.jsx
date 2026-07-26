@@ -1,16 +1,23 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 
 export default function WorkspaceSwitcher({ workspaceId, workspaceName, workspaces, onSwitch, onCreate, onRename, language, onSetLanguage, onOpenStorage }) {
   const [editing, setEditing] = useState(false)
   const [open, setOpen]       = useState(false)
   const [draft, setDraft]     = useState(workspaceName)
 
-  useEffect(() => setDraft(workspaceName), [workspaceName])
-
-  function commitRename() {
+  async function commitRename() {
     const t = draft.trim()
-    if (t && t !== workspaceName) onRename(t)
-    setEditing(false)
+    if (!t || t === workspaceName) {
+      setDraft(workspaceName)
+      setEditing(false)
+      return
+    }
+    try {
+      await onRename(t)
+      setEditing(false)
+    } catch {
+      setDraft(workspaceName)
+    }
   }
 
   return (
@@ -29,7 +36,11 @@ export default function WorkspaceSwitcher({ workspaceId, workspaceName, workspac
             autoFocus
           />
         ) : (
-          <span className="workspace-name" onClick={() => setEditing(true)} title="Click to rename">
+          <span
+            className="workspace-name"
+            onClick={() => { setDraft(workspaceName); setEditing(true) }}
+            title="Click to rename"
+          >
             {workspaceName || 'workspace'}
           </span>
         )}

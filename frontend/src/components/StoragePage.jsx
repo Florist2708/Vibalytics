@@ -5,12 +5,19 @@ import { fmtBytes } from '../utils.js'
 function CleanupCard({ title, description, impact, impactZero, onConfirm, danger }) {
   const [confirming, setConfirming] = useState(false)
   const [done,       setDone]       = useState(false)
+  const [error,      setError]      = useState(null)
 
   async function go() {
     setConfirming(true)
-    await onConfirm()
-    setDone(true)
-    setConfirming(false)
+    setError(null)
+    try {
+      await onConfirm()
+      setDone(true)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setConfirming(false)
+    }
   }
 
   return (
@@ -28,6 +35,7 @@ function CleanupCard({ title, description, impact, impactZero, onConfirm, danger
               {confirming ? '…' : 'Delete'}
             </button>
         }
+        {error && <span className="cleanup-error">{error}</span>}
       </div>
     </div>
   )
@@ -35,11 +43,12 @@ function CleanupCard({ title, description, impact, impactZero, onConfirm, danger
 
 export default function StoragePage({
   workspaceId, workspaceName, workspaces = [],
-  onBack, onWorkspaceDeleted, onWorkspacesDeleted,
+  onBack, onWorkspacesDeleted,
   onRefreshRuns, onRefreshMessages,
 }) {
   const [stats,    setStats]    = useState(null)
   const [loading,  setLoading]  = useState(true)
+  const [loadError, setLoadError] = useState(null)
 
   // Multi-select delete state
   const [selected,    setSelected]    = useState(new Set())
@@ -50,16 +59,24 @@ export default function StoragePage({
 
   async function loadStats() {
     setLoading(true)
+    setLoadError(null)
     try {
       const res = await fetch(`${API}/workspace/${workspaceId}/storage`)
-      if (res.ok) setStats(await res.json())
+      if (!res.ok) throw new Error(`Storage summary failed (${res.status})`)
+      setStats(await res.json())
+    } catch (e) {
+      setLoadError(e.message)
     } finally { setLoading(false) }
   }
 
   useEffect(() => { loadStats() }, [workspaceId])  // eslint-disable-line react-hooks/exhaustive-deps
 
   async function cleanup(action) {
-    await fetch(`${API}/workspace/${workspaceId}/cleanup/${action}`, { method: 'POST' })
+    const response = await fetch(`${API}/workspace/${workspaceId}/cleanup/${action}`, { method: 'POST' })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      throw new Error(payload.detail || 'Cleanup failed')
+    }
     await loadStats()
     if (action === 'chat')        onRefreshMessages?.()
     if (action === 'run_history') onRefreshRuns?.()
@@ -134,6 +151,7 @@ export default function StoragePage({
       </div>
 
       <div className="cleanup-list">
+        {loadError && <div className="cleanup-error">{loadError}</div>}
         <CleanupCard
           title="Clear chat history"
           description="Removes all messages from the conversation panel. Run history is kept."

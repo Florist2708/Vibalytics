@@ -33,9 +33,31 @@ PLOT_DIR    = Path("/tmp/vibalytics_plots")
 TABLE_DIR   = Path("/tmp/vibalytics_tables")
 EXPORT_DIR  = Path("/tmp/vibalytics_exports")
 VERSION_DIR = Path("/tmp/vibalytics_versions")
-R_LIBS_DIR  = Path.home() / ".vibalytics" / "r_libs"
-for _d in (PLOT_DIR, TABLE_DIR, EXPORT_DIR, VERSION_DIR, R_LIBS_DIR):
+
+for _d in (PLOT_DIR, TABLE_DIR, EXPORT_DIR, VERSION_DIR):
     _d.mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_r_libs_dir() -> Path:
+    """Prefer persistent user storage, but support read-only container homes."""
+    configured = os.environ.get("VIBALYTICS_R_LIBS")
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend([
+        Path.home() / ".vibalytics" / "r_libs",
+        Path("/tmp/vibalytics_r_libs"),
+    ])
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            return candidate
+        except OSError:
+            continue
+    raise RuntimeError("No writable directory is available for R packages")
+
+
+R_LIBS_DIR = _resolve_r_libs_dir()
 
 # Base R packages that are always available — never try to install these
 _BASE_PKGS = frozenset({

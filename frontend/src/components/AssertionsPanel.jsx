@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { fetchAssertions, createAssertion, patchAssertion, deleteAssertion, runFileChecks } from '../api.js'
 
-export const CHECK_TYPES = [
+const CHECK_TYPES = [
   { value: 'unique',        label: 'unique values',     needsCol: true,  needsVal: false, valLabel: '' },
   { value: 'not_null',      label: 'no nulls',          needsCol: true,  needsVal: false, valLabel: '' },
   { value: 'gte',           label: '>= value',          needsCol: true,  needsVal: true,  valLabel: 'Min value' },
@@ -20,6 +20,7 @@ export default function AssertionsPanel({ fileId, schema }) {
   const [showAdd, setShowAdd]       = useState(false)
   const [editingId, setEditingId]   = useState(null)
   const [editingName, setEditingName] = useState('')
+  const [error, setError]           = useState(null)
 
   const [newName, setNewName]       = useState('')
   const [newType, setNewType]       = useState('not_null')
@@ -31,11 +32,18 @@ export default function AssertionsPanel({ fileId, schema }) {
   const selectedType = CHECK_TYPES.find(t => t.value === newType) || CHECK_TYPES[0]
 
   useEffect(() => {
-    fetchAssertions(fileId).then(setAssertions).catch(() => setAssertions([]))
+    setError(null)
+    fetchAssertions(fileId)
+      .then(setAssertions)
+      .catch(e => {
+        setAssertions([])
+        setError(e.message)
+      })
   }, [fileId])
 
   async function handleAdd() {
     if (!newName.trim()) return
+    setError(null)
     const params = {}
     if (selectedType.needsVal) {
       if (newType === 'in_set') {
@@ -59,17 +67,29 @@ export default function AssertionsPanel({ fileId, schema }) {
       setShowAdd(false)
       setNewName('')
       setNewVal('')
-    } catch {}
+    } catch (e) {
+      setError(e.message)
+    }
   }
 
   async function handleToggle(a) {
-    await patchAssertion(fileId, a.id, { enabled: !a.enabled })
-    setAssertions(prev => prev.map(x => x.id === a.id ? { ...x, enabled: !x.enabled } : x))
+    setError(null)
+    try {
+      await patchAssertion(fileId, a.id, { enabled: !a.enabled })
+      setAssertions(prev => prev.map(x => x.id === a.id ? { ...x, enabled: !x.enabled } : x))
+    } catch (e) {
+      setError(e.message)
+    }
   }
 
   async function handleDelete(id) {
-    await deleteAssertion(fileId, id)
-    setAssertions(prev => prev.filter(x => x.id !== id))
+    setError(null)
+    try {
+      await deleteAssertion(fileId, id)
+      setAssertions(prev => prev.filter(x => x.id !== id))
+    } catch (e) {
+      setError(e.message)
+    }
   }
 
   function startRename(a) {
@@ -79,14 +99,20 @@ export default function AssertionsPanel({ fileId, schema }) {
 
   async function commitRename(id) {
     const name = editingName.trim()
-    setEditingId(null)
     if (!name) return
-    await patchAssertion(fileId, id, { name })
-    setAssertions(prev => prev.map(x => x.id === id ? { ...x, name } : x))
+    setError(null)
+    try {
+      await patchAssertion(fileId, id, { name })
+      setAssertions(prev => prev.map(x => x.id === id ? { ...x, name } : x))
+      setEditingId(null)
+    } catch (e) {
+      setError(e.message)
+    }
   }
 
   async function handleRun() {
     setRunning(true)
+    setError(null)
     try {
       const res = await runFileChecks(fileId)
       // merge results back into assertions list
@@ -96,8 +122,11 @@ export default function AssertionsPanel({ fileId, schema }) {
         ...a,
         last_result: byId[a.id] !== undefined ? byId[a.id] : a.last_result,
       })))
-    } catch {}
-    setRunning(false)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setRunning(false)
+    }
   }
 
   if (assertions === null) return <div className="assertions-panel"><span className="muted">Loading…</span></div>
@@ -124,6 +153,8 @@ export default function AssertionsPanel({ fileId, schema }) {
           <button className="assert-add-btn" onClick={() => setShowAdd(v => !v)}>+ add</button>
         </div>
       </div>
+
+      {error && <div className="global-error">{error}</div>}
 
       {assertions.length === 0 && !showAdd && (
         <div className="assertions-empty muted">No contracts yet — add checks to validate this dataset</div>

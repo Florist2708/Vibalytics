@@ -11,6 +11,8 @@ export default function CodeEditorPage({
   const [draft, setDraft]         = useState(target.code)
   const [savedCode, setSavedCode] = useState(target.code)
   const [copied, setCopied]       = useState(false)
+  const [saving, setSaving]       = useState(false)
+  const [saveError, setSaveError] = useState(null)
   const [editorChatW, dragEditorChat, resetEditorChat] = usePanelSize('editor-chat', 300, 80, 900)
 
   const isDirty = draft !== savedCode
@@ -24,10 +26,18 @@ export default function CodeEditorPage({
     setTimeout(() => setCopied(false), 1500)
   }
 
-  function handleSave() {
+  async function handleSave() {
     if (!target.runId || isTemp) return
-    onSave(target.runId, draft)
-    setSavedCode(draft)
+    setSaving(true)
+    setSaveError(null)
+    try {
+      await onSave(target.runId, draft)
+      setSavedCode(draft)
+    } catch (e) {
+      setSaveError(e.message)
+    } finally {
+      setSaving(false)
+    }
   }
 
   function handleRerun() {
@@ -53,10 +63,13 @@ export default function CodeEditorPage({
             </>
           )}
           <button onClick={copy}>{copied ? 'Copied!' : 'Copy'}</button>
-          <button onClick={handleSave} disabled={!isDirty || isTemp || !target.runId}>Save</button>
+          <button onClick={handleSave} disabled={!isDirty || isTemp || !target.runId || saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
           <button className="editor-rerun-btn" onClick={handleRerun} disabled={streaming}>↺ Rerun</button>
         </div>
       </div>
+      {saveError && <div className="global-error">{saveError}</div>}
       <div className="editor-body">
         <textarea
           className="editor-textarea"

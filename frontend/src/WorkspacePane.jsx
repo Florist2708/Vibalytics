@@ -7,7 +7,7 @@ import {
   streamSSE, streamSSEGet, stopRun, fetchConfig,
 } from './api.js'
 
-import { stripCodeBlocks } from './utils.js'
+import { scrollToRun, stripCodeBlocks } from './utils.js'
 import { usePanelSize } from './hooks.js'
 import Splitter from './components/Splitter.jsx'
 import FilePanel from './components/FilePanel.jsx'
@@ -17,7 +17,12 @@ import CodeEditorPage from './components/CodeEditorPage.jsx'
 import HistoryPage from './components/HistoryPage.jsx'
 import StoragePage from './components/StoragePage.jsx'
 import InspectorPage from './components/InspectorPage.jsx'
-import { scrollToRun } from './components/RunCard.jsx'
+
+async function requireOk(response, fallback) {
+  if (response.ok) return response
+  const payload = await response.json().catch(() => ({}))
+  throw new Error(payload.detail || fallback)
+}
 
 function mkTab(id, n) {
   return { id, label: `Chat ${n}`, messages: [], runs: [], streaming: false, pendingProposals: {}, rejectedProposals: {}, pendingSuggestion: null }
@@ -51,11 +56,6 @@ export default function WorkspacePane() {
   const [activeChatTabId, setActiveChatTabId] = useState('ct0')
 
   const activeTab  = chatTabs.find(t => t.id === activeChatTabId) || chatTabs[0]
-  const messages   = activeTab.messages
-  const runs       = activeTab.runs
-  const streaming  = activeTab.streaming
-  const pendingProposals  = activeTab.pendingProposals
-  const rejectedProposals = activeTab.rejectedProposals
   const anyStreaming = chatTabs.some(t => t.streaming)
 
   function tabSetters(tabId) {
@@ -89,13 +89,16 @@ export default function WorkspacePane() {
 
   // Load workspace list whenever session changes
   useEffect(() => {
-    if (sessionId) fetchWorkspaceList().then(setWorkspaces).catch(() => {})
+    if (sessionId) fetchWorkspaceList().then(setWorkspaces).catch(e => setGlobalError(e.message))
   }, [sessionId])
 
   useEffect(() => {
     const stored = localStorage.getItem(storageKey)
     initSession(stored)
-    fetchConfig().then(setAgentConfig).catch(() => {})
+    fetchConfig().then(setAgentConfig).catch(e => setGlobalError(e.message))
+    // initSession reads the initial persisted workspace; later workspace changes
+    // go through switchWorkspace and must not retrigger boot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -104,10 +107,13 @@ export default function WorkspacePane() {
       tabSetters(activeChatTabId).setPendingSuggestion(null)
       handleSend(text, false, activeChatTabId)
     }
-  }, [activeTab?.pendingSuggestion, activeChatTabId, sessionId, files.length, activeTab?.streaming])
+    // handleSend changes with workspace state; the explicit state dependencies
+    // below are the conditions that should release a queued suggestion.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab.pendingSuggestion, activeChatTabId, sessionId, files.length, activeTab.streaming])
 
   async function initSession(storedId) {
-    fetchWorkflows().then(setWorkflows).catch(() => {})
+    fetchWorkflows().then(setWorkflows).catch(e => setGlobalError(e.message))
     if (storedId) {
       try {
         const ctx = await fetchContext(storedId)
@@ -129,10 +135,12 @@ export default function WorkspacePane() {
               if (Object.keys(pendingProposals).length) s.setPendingProposals(pendingProposals)
               if (Object.keys(rejectedProposals).length) s.setRejectedProposals(rejectedProposals)
             })
-            .catch(() => {})
+            .catch(e => setGlobalError(e.message))
         }
         return
-      } catch {}
+      } catch {
+        localStorage.removeItem(storageKey)
+      }
     }
     try {
       const id = await createSession()
@@ -176,7 +184,7 @@ export default function WorkspacePane() {
       setSessionId(id)
       setWorkspaceName('workspace')
       setWorkspaceLang('r')
-      fetchWorkspaceList().then(setWorkspaces).catch(() => {})
+      fetchWorkspaceList().then(setWorkspaces).catch(e => setGlobalError(e.message))
     } catch (e) {
       setGlobalError(e.message)
     }
@@ -184,27 +192,40 @@ export default function WorkspacePane() {
 
   async function handleRenameWorkspace(name) {
     if (!sessionId) return
-    await renameWorkspace(sessionId, name).catch(() => {})
-    setWorkspaceName(name)
-    fetchWorkspaceList().then(setWorkspaces).catch(() => {})
+    try {
+      await renameWorkspace(sessionId, name)
+      setWorkspaceName(name)
+      setWorkspaces(await fetchWorkspaceList())
+    } catch (e) {
+      setGlobalError(e.message)
+      throw e
+    }
   }
 
   async function handleSetLanguage(lang) {
     if (!sessionId) return
-    await patchWorkspace(sessionId, { language: lang }).catch(() => {})
-    setWorkspaceLang(lang)
+    try {
+      await patchWorkspace(sessionId, { language: lang })
+      setWorkspaceLang(lang)
+    } catch (e) {
+      setGlobalError(e.message)
+    }
   }
 
   function handleStop() {
     if (!sessionId) return
-    stopRun(sessionId).catch(() => {})
+    stopRun(sessionId).catch(e => setGlobalError(e.message))
   }
 
   async function handleToggleAutoApprove() {
     if (!sessionId) return
     const next = !autoApprove
-    setAutoApprove(next)
-    await patchWorkspace(sessionId, { auto_approve: next }).catch(() => {})
+    try {
+      await patchWorkspace(sessionId, { auto_approve: next })
+      setAutoApprove(next)
+    } catch (e) {
+      setGlobalError(e.message)
+    }
   }
 
   async function handleUpload(file) {
@@ -257,37 +278,58 @@ export default function WorkspacePane() {
     if (!file) return
     if (!window.confirm(`Remove "${file.name}" from this workspace?`)) return
     try {
-      await fetch(`${API}/workspace/${sessionId}/file/${fileId}`, { method: 'DELETE' })
-    } catch {}
-    setFiles(prev => prev.filter(f => f.id !== fileId))
-    const newIds = inspectorFileIds.filter(id => id !== fileId)
-    setInspectorFileIds(newIds)
-    if (activeInspectorFileId === fileId) {
-      setActiveInspectorFileId(newIds[0] || null)
+      const response = await fetch(`${API}/workspace/${sessionId}/file/${fileId}`, { method: 'DELETE' })
+      await requireOk(response, 'Failed to remove file')
+      setFiles(prev => prev.filter(f => f.id !== fileId))
+      const newIds = inspectorFileIds.filter(id => id !== fileId)
+      setInspectorFileIds(newIds)
+      if (activeInspectorFileId === fileId) {
+        setActiveInspectorFileId(newIds[0] || null)
+      }
+    } catch (e) {
+      setGlobalError(e.message)
     }
   }
 
   async function handleRestoreFile(fileId) {
-    await fetch(`${API}/workspace/${sessionId}/file/${fileId}/restore?session_id=${sessionId}`, { method: 'POST' })
-    fetchContext(sessionId).then(ctx => {
+    try {
+      const response = await fetch(
+        `${API}/workspace/${sessionId}/file/${fileId}/restore?session_id=${sessionId}`,
+        { method: 'POST' },
+      )
+      await requireOk(response, 'Failed to restore file')
+      const ctx = await fetchContext(sessionId)
       if (ctx.files) setFiles(ctx.files)
       if (ctx.archived_files) setArchivedFiles(ctx.archived_files)
-    }).catch(() => {})
+    } catch (e) {
+      setGlobalError(e.message)
+    }
   }
 
   async function handleHardDeleteFile(fileId) {
     if (!window.confirm('Permanently delete this file? This cannot be undone.')) return
-    await fetch(`${API}/workspace/${sessionId}/file/${fileId}/hard`, { method: 'DELETE' })
-    setArchivedFiles(prev => prev.filter(f => f.id !== fileId))
+    try {
+      const response = await fetch(`${API}/workspace/${sessionId}/file/${fileId}/hard`, { method: 'DELETE' })
+      await requireOk(response, 'Failed to permanently delete file')
+      setArchivedFiles(prev => prev.filter(f => f.id !== fileId))
+    } catch (e) {
+      setGlobalError(e.message)
+    }
   }
 
   async function handleSaveNotes(fileId, notes) {
-    await fetch(`${API}/workspace/${sessionId}/file/${fileId}/notes`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ notes }),
-    })
-    setFiles(prev => prev.map(f => f.id === fileId ? { ...f, notes } : f))
+    try {
+      const response = await fetch(`${API}/workspace/${sessionId}/file/${fileId}/notes`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes }),
+      })
+      await requireOk(response, 'Failed to save notes')
+      setFiles(prev => prev.map(f => f.id === fileId ? { ...f, notes } : f))
+    } catch (e) {
+      setGlobalError(e.message)
+      throw e
+    }
   }
 
   async function handleAcceptProposal(runId, proposalId, tabId = activeChatTabId) {
@@ -311,13 +353,13 @@ export default function WorkspacePane() {
       fetchContext(sessionId).then(ctx => {
         if (ctx.files) setFiles(ctx.files)
         if (ctx.archived_files) setArchivedFiles(ctx.archived_files)
-      }).catch(() => {})
-      fetch(`${API}/run/${runId}`).then(r => r.json()).then(r => {
+      }).catch(e => setGlobalError(e.message))
+      fetch(`${API}/run/${runId}`).then(r => requireOk(r, 'Failed to refresh run')).then(r => r.json()).then(r => {
         s.setRuns(prev => prev.map(run => run.id === runId
           ? { ...run, producedVersions: r.produced_versions || [] }
           : run
         ))
-      }).catch(() => {})
+      }).catch(e => setGlobalError(e.message))
     } catch (e) {
       setGlobalError(e.message)
     }
@@ -328,8 +370,12 @@ export default function WorkspacePane() {
     const prop = (tab.pendingProposals[runId] || []).find(p => p.id === proposalId)
     const s = tabSetters(tabId)
     try {
-      await fetch(`${API}/run/${runId}/reject_version/${proposalId}`, { method: 'POST' })
-    } catch {}
+      const response = await fetch(`${API}/run/${runId}/reject_version/${proposalId}`, { method: 'POST' })
+      await requireOk(response, 'Failed to reject proposal')
+    } catch (e) {
+      setGlobalError(e.message)
+      return
+    }
     s.setPendingProposals(prev => {
       const updated = { ...prev }
       if (updated[runId]) updated[runId] = updated[runId].filter(p => p.id !== proposalId)
@@ -430,6 +476,9 @@ export default function WorkspacePane() {
   // setters: tab-scoped { setRuns, setMessages, setStreaming, setPendingProposals }
   function applySSEEvent(ev, runRef, { setRuns, setMessages, setStreaming, setPendingProposals }) {
     const { tempId, serverRunIdRef } = runRef
+    const appendRunError = content => setRuns(prev => prev.map(r =>
+      r.id === tempId ? { ...r, errors: [...r.errors, content] } : r
+    ))
 
     if (ev.type === 'run_id') {
       serverRunIdRef.current = ev.content
@@ -478,7 +527,9 @@ export default function WorkspacePane() {
         setRuns(prev => prev.map(r =>
           r.id === tempId ? { ...r, exports: [...(r.exports || []), exp] } : r
         ))
-      } catch {}
+      } catch {
+        appendRunError('The server returned an invalid export')
+      }
 
     } else if (ev.type === 'dataset_proposal') {
       try {
@@ -487,7 +538,9 @@ export default function WorkspacePane() {
           ...prev,
           [prop.run_id]: [...(prev[prop.run_id] || []), prop],
         }))
-      } catch {}
+      } catch {
+        appendRunError('The server returned an invalid dataset proposal')
+      }
 
     } else if (ev.type === 'dataset_auto_accepted') {
       // Auto-approve mode: change was committed, refresh file list
@@ -496,7 +549,7 @@ export default function WorkspacePane() {
           if (ctx.files) setFiles(ctx.files)
           if (ctx.archived_files) setArchivedFiles(ctx.archived_files)
         })
-        .catch(() => {})
+        .catch(e => setGlobalError(e.message))
 
     } else if (ev.type === 'installing') {
       setRuns(prev => prev.map(r =>
@@ -577,7 +630,7 @@ export default function WorkspacePane() {
           if (ctx.files) setFiles(ctx.files)
           if (ctx.archived_files) setArchivedFiles(ctx.archived_files)
         })
-        .catch(() => {})
+        .catch(e => setGlobalError(e.message))
     }
   }
 
@@ -676,7 +729,7 @@ export default function WorkspacePane() {
       parentId:   runId,
     }])
 
-    streamSSE(`${API}/run/${runId}/rerun`, { session_id: sessionId },
+    streamSSE(`${API}/run/${runId}/rerun`, { session_id: sessionId, code },
       ev => applySSEEvent(ev, runRef, s)
     )
   }
@@ -690,9 +743,17 @@ export default function WorkspacePane() {
     })
   }
 
-  function handleEditorSave(runId, code) {
-    saveEditedCode(runId, code)
-    setRuns(prev => prev.map(r => r.id === runId ? { ...r, editedCode: code } : r))
+  async function handleEditorSave(runId, code) {
+    const tabId = chatTabs.find(t => t.runs.some(r => r.id === runId))?.id || activeChatTabId
+    try {
+      await saveEditedCode(runId, code)
+      tabSetters(tabId).setRuns(prev => prev.map(r =>
+        r.id === runId ? { ...r, editedCode: code } : r
+      ))
+    } catch (e) {
+      setGlobalError(e.message)
+      throw e
+    }
   }
 
   function handleEditorRerun(runId, code) {
@@ -720,11 +781,7 @@ export default function WorkspacePane() {
     fetchContext(sessionId).then(ctx => {
       if (ctx.files) setFiles(ctx.files)
       if (ctx.archived_files) setArchivedFiles(ctx.archived_files)
-    }).catch(() => {})
-  }
-
-  function handleWorkspaceDeleted(deletedId) {
-    handleWorkspacesDeleted([deletedId])
+    }).catch(e => setGlobalError(e.message))
   }
 
   function handleWorkspacesDeleted(deletedIds) {
@@ -738,7 +795,7 @@ export default function WorkspacePane() {
         handleCreateWorkspace()
       }
     } else {
-      fetchWorkspaceList().then(setWorkspaces).catch(() => {})
+      fetchWorkspaceList().then(setWorkspaces).catch(e => setGlobalError(e.message))
     }
   }
 
@@ -794,7 +851,6 @@ export default function WorkspacePane() {
         workspaceName={workspaceName}
         workspaces={workspaces}
         onBack={() => setMode('analysis')}
-        onWorkspaceDeleted={handleWorkspaceDeleted}
         onWorkspacesDeleted={handleWorkspacesDeleted}
         onRefreshRuns={() => tabSetters(activeChatTabId).setRuns([])}
         onRefreshMessages={() => tabSetters(activeChatTabId).setMessages([])}
@@ -827,7 +883,7 @@ export default function WorkspacePane() {
         onFileReverted={() => fetchContext(sessionId).then(ctx => {
           if (ctx.files) setFiles(ctx.files)
           if (ctx.archived_files) setArchivedFiles(ctx.archived_files)
-        }).catch(() => {})}
+        }).catch(e => setGlobalError(e.message))}
       />
     )
   }
@@ -885,7 +941,7 @@ export default function WorkspacePane() {
                 autoApprove={autoApprove}
                 onToggleAutoApprove={handleToggleAutoApprove}
                 agentConfig={agentConfig}
-                onAgentChange={() => fetchConfig().then(setAgentConfig).catch(() => {})}
+                onAgentChange={() => fetchConfig().then(setAgentConfig).catch(e => setGlobalError(e.message))}
               />
             </div>
           ))}

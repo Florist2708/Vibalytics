@@ -16,7 +16,6 @@ export default function HistoryPage({ runs, onBack, onResume }) {
   })
 
   const okCount    = runs.filter(r => !r.streaming && !r.errors?.length).length
-  const errCount   = runs.filter(r => !r.streaming && r.errors?.length > 0).length
   const totalRuns  = runs.filter(r => !r.streaming).length
 
   return (

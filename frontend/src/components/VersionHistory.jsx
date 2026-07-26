@@ -39,15 +39,23 @@ export default function VersionHistory({ fileId, sessionId, onReverted }) {
     }
   }
 
-  function handleCompare(versionId) {
+  async function handleCompare(versionId) {
     if (compareId === versionId) { setCompareId(null); setDiff(null); return }
     setCompareId(versionId)
+    setDiff(null)
+    setError(null)
     const currentId = versions?.find(v => v.id === currentVersionId)?.id
     if (!currentId) return
-    fetch(`${API}/file/${fileId}/diff?a=${versionId}&b=${currentId}`)
-      .then(r => r.json())
-      .then(setDiff)
-      .catch(() => {})
+    try {
+      const response = await fetch(`${API}/file/${fileId}/diff?a=${versionId}&b=${currentId}`)
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        throw new Error(payload.detail || 'Failed to compare versions')
+      }
+      setDiff(await response.json())
+    } catch (e) {
+      setError(e.message)
+    }
   }
 
   if (loading) return <div className="version-history-state">Loading history…</div>

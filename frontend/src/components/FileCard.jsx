@@ -5,7 +5,7 @@ import FileProfile from './FileProfile.jsx'
 import MissingnessPanel from './MissingnessPanel.jsx'
 import AssertionsPanel from './AssertionsPanel.jsx'
 
-export default function FileCard({ file, sessionId, active, onToggleActive, onSuggest, onInspect, onDeleteFile, onSaveNotes, workspaceId }) {
+export default function FileCard({ file, sessionId, active, onToggleActive, onSuggest, onInspect, onDeleteFile, onSaveNotes }) {
   const [expanded, setExpanded]         = useState(false)
   const [preview, setPreview]           = useState(null)
   const [loadingPrev, setLoading]       = useState(false)
@@ -15,17 +15,22 @@ export default function FileCard({ file, sessionId, active, onToggleActive, onSu
   const [showProfile, setShowProfile]   = useState(false)
   const [showAssertions, setShowAssertions] = useState(false)
   const [notesText, setNotesText]       = useState(file.notes || '')
+  const [previewError, setPreviewError] = useState(null)
 
   async function togglePreview() {
     if (expanded) { setExpanded(false); return }
     if (preview)  { setExpanded(true);  return }
     setLoading(true)
+    setPreviewError(null)
     try {
       const data = await fetchPreview(sessionId, file.name)
       setPreview(data)
       setExpanded(true)
-    } catch {}
-    setLoading(false)
+    } catch (e) {
+      setPreviewError(e.message)
+    } finally {
+      setLoading(false)
+    }
   }
 
   const suggestions = makeSuggestions(file)
@@ -114,6 +119,7 @@ export default function FileCard({ file, sessionId, active, onToggleActive, onSu
       {showMiss && <MissingnessPanel fileId={file.id} />}
 
       {showAssertions && <AssertionsPanel fileId={file.id} schema={file.schema} />}
+      {previewError && <div className="global-error">{previewError}</div>}
 
       {showNotes && (
         <div className="file-notes-panel">

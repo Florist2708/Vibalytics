@@ -1,8 +1,14 @@
 export const API = ''
 export const STORAGE_KEY = 'vibalytics_workspace_id'
 
+async function responseError(response, fallback) {
+  const payload = await response.json().catch(() => ({}))
+  return new Error(payload.detail || fallback)
+}
+
 export async function createSession() {
   const r = await fetch(`${API}/session`, { method: 'POST' })
+  if (!r.ok) throw await responseError(r, 'Failed to create workspace')
   return (await r.json()).session_id
 }
 
@@ -11,41 +17,39 @@ export async function uploadFile(sessionId, file) {
   fd.append('file', file)
   fd.append('session_id', sessionId)
   const r = await fetch(`${API}/upload`, { method: 'POST', body: fd })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Upload failed')
+  if (!r.ok) throw await responseError(r, 'Upload failed')
   return r.json()
 }
 
 export async function fetchContext(sessionId) {
   const r = await fetch(`${API}/context/${sessionId}`)
-  if (!r.ok) throw new Error('not found')
+  if (!r.ok) throw await responseError(r, 'Workspace not found')
   return r.json()
 }
 
 export async function fetchWorkspaceList() {
   const r = await fetch(`${API}/workspaces`)
-  if (!r.ok) return []
+  if (!r.ok) throw await responseError(r, 'Failed to load workspaces')
   return r.json()
 }
 
 export async function patchWorkspace(id, patch) {
-  await fetch(`${API}/workspace/${id}`, {
+  const r = await fetch(`${API}/workspace/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
   })
+  if (!r.ok) throw await responseError(r, 'Failed to update workspace')
+  return r.json()
 }
 
 export async function renameWorkspace(id, name) {
-  await fetch(`${API}/workspace/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  })
+  return patchWorkspace(id, { name })
 }
 
 export async function fetchWorkflows() {
   const r = await fetch(`${API}/workflows`)
-  if (!r.ok) return []
+  if (!r.ok) throw await responseError(r, 'Failed to load workflows')
   return r.json()
 }
 
@@ -55,18 +59,18 @@ export async function createWorkflow(name, runId) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, run_id: runId }),
   })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Save failed')
+  if (!r.ok) throw await responseError(r, 'Save failed')
   return r.json()
 }
 
 export async function apiDeleteWorkflow(id) {
   const r = await fetch(`${API}/workflows/${id}`, { method: 'DELETE' })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Delete failed')
+  if (!r.ok) throw await responseError(r, 'Delete failed')
 }
 
 export async function fetchFileVersions(fileId) {
   const r = await fetch(`${API}/file/${fileId}/versions`)
-  if (!r.ok) throw new Error('Failed to fetch versions')
+  if (!r.ok) throw await responseError(r, 'Failed to fetch versions')
   return r.json()
 }
 
@@ -76,7 +80,7 @@ export async function editFileCells(sessionId, fileId, edits) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ edits }),
   })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Edit failed')
+  if (!r.ok) throw await responseError(r, 'Edit failed')
   return r.json()
 }
 
@@ -85,25 +89,26 @@ export async function revertFileVersion(fileId, versionId, sessionId) {
     `${API}/file/${fileId}/revert/${versionId}?session_id=${encodeURIComponent(sessionId)}`,
     { method: 'POST' },
   )
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Revert failed')
+  if (!r.ok) throw await responseError(r, 'Revert failed')
   return r.json()
 }
 
 export async function stopRun(workspaceId) {
-  await fetch(`${API}/workspace/${workspaceId}/stop`, { method: 'POST' })
+  const r = await fetch(`${API}/workspace/${workspaceId}/stop`, { method: 'POST' })
+  if (!r.ok) throw await responseError(r, 'Failed to stop run')
 }
 
 export async function uploadChatAttachment(workspaceId, file) {
   const fd = new FormData()
   fd.append('file', file)
   const r = await fetch(`${API}/workspace/${workspaceId}/chat/attachment`, { method: 'POST', body: fd })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Attachment upload failed')
+  if (!r.ok) throw await responseError(r, 'Attachment upload failed')
   return r.json()  // {id, filename, mime_type, size}
 }
 
 export async function fetchConfig() {
   const r = await fetch(`${API}/config`)
-  if (!r.ok) return { command: 'claude -p', preset_id: 'claude', presets: [] }
+  if (!r.ok) throw await responseError(r, 'Failed to load agent configuration')
   return r.json()
 }
 
@@ -113,7 +118,7 @@ export async function patchConfig(patch) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
   })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Save failed')
+  if (!r.ok) throw await responseError(r, 'Save failed')
   return r.json()
 }
 
@@ -123,13 +128,13 @@ export async function importData(workspaceId, payload) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Import failed')
+  if (!r.ok) throw await responseError(r, 'Import failed')
   return r.json()
 }
 
 export async function fetchAssertions(fileId) {
   const r = await fetch(`${API}/file/${fileId}/assertions`)
-  if (!r.ok) return []
+  if (!r.ok) throw await responseError(r, 'Failed to load checks')
   return r.json()
 }
 
@@ -139,35 +144,44 @@ export async function createAssertion(fileId, payload) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Failed')
+  if (!r.ok) throw await responseError(r, 'Failed to create check')
   return r.json()
 }
 
 export async function patchAssertion(fileId, assertionId, payload) {
-  await fetch(`${API}/file/${fileId}/assertion/${assertionId}`, {
+  const r = await fetch(`${API}/file/${fileId}/assertion/${assertionId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   })
+  if (!r.ok) throw await responseError(r, 'Failed to update check')
+  return r.json()
 }
 
 export async function deleteAssertion(fileId, assertionId) {
-  await fetch(`${API}/file/${fileId}/assertion/${assertionId}`, { method: 'DELETE' })
+  const r = await fetch(`${API}/file/${fileId}/assertion/${assertionId}`, { method: 'DELETE' })
+  if (!r.ok) throw await responseError(r, 'Failed to delete check')
 }
 
 export async function runFileChecks(fileId) {
   const r = await fetch(`${API}/file/${fileId}/check`, { method: 'POST' })
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Check failed')
+  if (!r.ok) throw await responseError(r, 'Check failed')
   return r.json()
 }
 
 import { stripCodeBlocks } from './utils.js'
 
 export async function fetchPersistedRuns(workspaceId) {
-  const list = await fetch(`${API}/runs/${workspaceId}`).then(r => r.json())
+  const listResponse = await fetch(`${API}/runs/${workspaceId}`)
+  if (!listResponse.ok) throw await responseError(listResponse, 'Failed to load run history')
+  const list = await listResponse.json()
   if (!Array.isArray(list) || list.length === 0) return { runs: [], messages: [], pendingProposals: {}, rejectedProposals: {} }
   const detailed = await Promise.all(
-    list.map(r => fetch(`${API}/run/${r.id}`).then(res => res.json()))
+    list.map(async run => {
+      const response = await fetch(`${API}/run/${run.id}`)
+      if (!response.ok) throw await responseError(response, `Failed to load run ${run.id}`)
+      return response.json()
+    })
   )
   const messages = []
   const runs = []
@@ -218,16 +232,18 @@ export async function fetchPersistedRuns(workspaceId) {
 }
 
 export async function saveEditedCode(runId, code) {
-  await fetch(`${API}/run/${runId}`, {
+  const r = await fetch(`${API}/run/${runId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ edited_code: code }),
   })
+  if (!r.ok) throw await responseError(r, 'Failed to save code')
+  return r.json()
 }
 
 export async function fetchPreview(sessionId, varName) {
   const r = await fetch(`${API}/preview/${sessionId}/${varName}`)
-  if (!r.ok) throw new Error('Preview failed')
+  if (!r.ok) throw await responseError(r, 'Preview failed')
   return r.json()
 }
 
@@ -238,18 +254,39 @@ export async function fetchData(sessionId, fileId, { offset = 0, limit = 100, so
   if (filterVal) params.set('filter_val', filterVal)
   if (filterOp && filterOp !== 'contains') params.set('filter_op', filterOp)
   const r = await fetch(`${API}/data/${sessionId}/${fileId}?${params}`)
-  if (!r.ok) throw new Error('Data fetch failed')
+  if (!r.ok) throw await responseError(r, 'Data fetch failed')
   return r.json()
 }
 
-export function _readSSEStream(r, onEvent, ctrl) {
-  ;(async () => {
+export async function _readSSEStream(r, onEvent) {
+  let doneSeen = false
+  let aborted = false
+
+  const emit = event => {
+    if (event.type === 'done') doneSeen = true
+    onEvent(event)
+  }
+
+  const parseLine = line => {
+    const normalized = line.endsWith('\r') ? line.slice(0, -1) : line
+    if (!normalized.startsWith('data:')) return
+    const payload = normalized.slice(5).trimStart()
+    if (!payload) return
+    try {
+      emit(JSON.parse(payload))
+    } catch {
+      emit({ type: 'error', content: 'Received a malformed event from the server' })
+    }
+  }
+
+  try {
     if (!r.ok) {
       const err = await r.json().catch(() => ({}))
-      onEvent({ type: 'error', content: err.detail || `Request failed (${r.status})` })
-      onEvent({ type: 'done', content: '' })
+      emit({ type: 'error', content: err.detail || `Request failed (${r.status})` })
       return
     }
+    if (!r.body) throw new Error('Server returned an empty response')
+
     const reader = r.body.getReader()
     const dec = new TextDecoder()
     let buf = ''
@@ -259,13 +296,27 @@ export function _readSSEStream(r, onEvent, ctrl) {
       buf += dec.decode(value, { stream: true })
       const lines = buf.split('\n')
       buf = lines.pop()
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        try { onEvent(JSON.parse(line.slice(6))) } catch {}
-      }
+      lines.forEach(parseLine)
     }
-  })().catch(e => {
-    if (e.name !== 'AbortError') onEvent({ type: 'error', content: e.message })
+    buf += dec.decode()
+    if (buf) parseLine(buf)
+    if (!doneSeen) emit({ type: 'error', content: 'Connection closed before the run completed' })
+  } catch (e) {
+    aborted = e.name === 'AbortError'
+    if (!aborted) emit({ type: 'error', content: e.message })
+  } finally {
+    if (!doneSeen) emit({
+      type: 'done',
+      content: JSON.stringify({ success: false, interrupted: aborted }),
+    })
+  }
+}
+
+function handleConnectionFailure(error, onEvent) {
+  if (error.name !== 'AbortError') onEvent({ type: 'error', content: error.message })
+  onEvent({
+    type: 'done',
+    content: JSON.stringify({ success: false, interrupted: error.name === 'AbortError' }),
   })
 }
 
@@ -276,15 +327,15 @@ export function streamSSE(url, body, onEvent) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal: ctrl.signal,
-  }).then(r => _readSSEStream(r, onEvent, ctrl))
-    .catch(e => { if (e.name !== 'AbortError') onEvent({ type: 'error', content: e.message }) })
+  }).then(r => _readSSEStream(r, onEvent))
+    .catch(e => handleConnectionFailure(e, onEvent))
   return () => ctrl.abort()
 }
 
 export function streamSSEGet(url, onEvent) {
   const ctrl = new AbortController()
   fetch(url, { signal: ctrl.signal })
-    .then(r => _readSSEStream(r, onEvent, ctrl))
-    .catch(e => { if (e.name !== 'AbortError') onEvent({ type: 'error', content: e.message }) })
+    .then(r => _readSSEStream(r, onEvent))
+    .catch(e => handleConnectionFailure(e, onEvent))
   return () => ctrl.abort()
 }

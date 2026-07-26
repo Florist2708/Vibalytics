@@ -2,22 +2,34 @@ import { useState, useEffect } from 'react'
 import { API } from '../api.js'
 
 export default function ProposalDiff({ runId, propId }) {
-  const [diff, setDiff] = useState(null)
+  const [result, setResult] = useState({ key: null, diff: null, error: null })
   const [open, setOpen] = useState(true)
-  const [loading, setLoading] = useState(true)
+  const requestKey = `${runId}:${propId}`
 
   useEffect(() => {
-    fetch(`${API}/run/${runId}/proposal/${propId}/diff`)
-      .then(r => r.json())
-      .then(d => { setDiff(d); setLoading(false) })
-      .catch(() => setLoading(false))
-  }, [runId, propId])
+    const controller = new AbortController()
+    fetch(`${API}/run/${runId}/proposal/${propId}/diff`, { signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error(`Diff failed (${response.status})`)
+        return response.json()
+      })
+      .then(diff => setResult({ key: requestKey, diff, error: null }))
+      .catch(e => {
+        if (e.name !== 'AbortError') setResult({ key: requestKey, diff: null, error: e.message })
+      })
+    return () => controller.abort()
+  }, [runId, propId, requestKey])
+
+  const current = result.key === requestKey ? result : { diff: null, error: null }
+  const loading = result.key !== requestKey
+  const diff = current.diff
 
   return (
     <>
       <button className="proposal-diff-btn" onClick={() => setOpen(v => !v)} disabled={loading}>
         {loading ? '…' : open ? '△ Diff' : '⊿ Diff'}
       </button>
+      {current.error && <span className="cleanup-error">{current.error}</span>}
       {open && diff && (
         <div className="version-diff-view proposal-diff-inline">
           <div className="diff-summary">

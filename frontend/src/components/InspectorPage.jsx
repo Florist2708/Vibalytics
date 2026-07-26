@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { usePanelSize } from '../hooks.js'
 import Splitter from './Splitter.jsx'
 import FilePanel from './FilePanel.jsx'
@@ -17,20 +17,19 @@ export default function InspectorPage({
   runs, selectedRunId, onSelectRun,
   messages, streaming, globalError, onSend,
   onEditCode, onBack,
-  pendingProposals, rejectedProposals, onAcceptProposal, onRejectProposal, onRestoreProposal,
+  pendingProposals = {}, rejectedProposals = {}, onAcceptProposal, onRejectProposal, onRestoreProposal,
   onFileReverted,
 }) {
-  const [showHistory, setShowHistory] = useState(false)
+  const [historyFileId, setHistoryFileId] = useState(null)
   const [inspFileW,  dragInspFile,  resetInspFile]  = usePanelSize('insp-file',  220, 60, 700)
   const [inspRightW, dragInspRight, resetInspRight] = usePanelSize('insp-right', 360, 80, 900)
 
-  // Reset history view when active file changes
-  useEffect(() => setShowHistory(false), [activeInspectorFileId])
+  const showHistory = historyFileId === activeInspectorFileId
 
   const allProposals = Object.entries(pendingProposals).flatMap(([runId, props]) =>
     props.map(p => ({ ...p, runId }))
   )
-  const allRejected = Object.entries(rejectedProposals || {}).flatMap(([runId, props]) =>
+  const allRejected = Object.entries(rejectedProposals).flatMap(([runId, props]) =>
     props.map(p => ({ ...p, runId }))
   )
 
@@ -70,12 +69,16 @@ export default function InspectorPage({
                 <button
                   key={fid}
                   className={`data-tab ${fid === activeInspectorFileId ? 'active' : ''}`}
-                  onClick={() => onSetActiveFile(fid)}
+                  onClick={() => { setHistoryFileId(null); onSetActiveFile(fid) }}
                 >
                   {f?.name || fid.slice(0, 8)}
                   <span
                     className="data-tab-close"
-                    onClick={e => { e.stopPropagation(); onCloseInspectorFile(fid) }}
+                    onClick={e => {
+                      e.stopPropagation()
+                      if (historyFileId === fid) setHistoryFileId(null)
+                      onCloseInspectorFile(fid)
+                    }}
                   >×</span>
                 </button>
               )
@@ -85,7 +88,7 @@ export default function InspectorPage({
             {activeInspectorFileId && activeFile?.version_num > 1 && (
               <button
                 className={`history-toggle-btn ${showHistory ? 'active' : ''}`}
-                onClick={() => setShowHistory(v => !v)}
+                onClick={() => setHistoryFileId(showHistory ? null : activeInspectorFileId)}
                 title="Version history"
               >
                 ⟳ History
@@ -104,13 +107,13 @@ export default function InspectorPage({
             <VersionHistory
               fileId={activeInspectorFileId}
               sessionId={sessionId}
-              onReverted={() => { onFileReverted(); setShowHistory(false) }}
+              onReverted={() => { onFileReverted(); setHistoryFileId(null) }}
             />
           ) : (
             <DataTable
+              key={`${sessionId}:${activeInspectorFileId}:${activeFile?.version_num || 0}`}
               sessionId={sessionId}
               fileId={activeInspectorFileId}
-              version={activeFile?.version_num}
               onEdited={onFileReverted}
             />
           )

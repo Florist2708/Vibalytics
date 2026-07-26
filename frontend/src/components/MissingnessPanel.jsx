@@ -2,15 +2,25 @@ import { useState, useEffect } from 'react'
 import { API } from '../api.js'
 
 export default function MissingnessPanel({ fileId }) {
-  const [data, setData] = useState(null)
+  const [result, setResult] = useState({ fileId: null, data: null, error: null })
 
   useEffect(() => {
-    fetch(`${API}/file/${fileId}/missingness`)
-      .then(r => r.json())
-      .then(setData)
-      .catch(() => {})
+    const controller = new AbortController()
+    fetch(`${API}/file/${fileId}/missingness`, { signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error(`Missingness failed (${response.status})`)
+        return response.json()
+      })
+      .then(data => setResult({ fileId, data, error: null }))
+      .catch(e => {
+        if (e.name !== 'AbortError') setResult({ fileId, data: null, error: e.message })
+      })
+    return () => controller.abort()
   }, [fileId])
 
+  const current = result.fileId === fileId ? result : { data: null, error: null }
+  const data = current.data
+  if (current.error) return <div className="miss-panel"><div className="global-error">{current.error}</div></div>
   if (!data) return null
   const cols = data.columns.filter(c => c.miss_pct > 0)
 

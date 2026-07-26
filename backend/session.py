@@ -129,6 +129,11 @@ def get(workspace_id: str) -> ActiveSession | None:
     return None
 
 
+def get_active(workspace_id: str) -> ActiveSession | None:
+    """Return only an already-running session; never start a new executor."""
+    return _active.get(workspace_id)
+
+
 def delete(workspace_id: str):
     s = _active.pop(workspace_id, None)
     if s:

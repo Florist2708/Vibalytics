@@ -16,19 +16,31 @@ function MiniHistogram({ breaks, counts }) {
 }
 
 export default function ColumnDetailPanel({ sessionId, fileId, col, onClose }) {
-  const [detail, setDetail] = useState(null)
-  const [loading, setLoading] = useState(true)
+  const [result, setResult] = useState({ key: null, detail: null, error: null })
+  const requestKey = col ? `${sessionId}:${fileId}:${col}` : null
 
   useEffect(() => {
     if (!col) return
-    setLoading(true)
-    fetch(`${API}/data/${sessionId}/${fileId}/column/${encodeURIComponent(col)}`)
-      .then(r => r.json())
-      .then(d => { setDetail(d); setLoading(false) })
-      .catch(() => setLoading(false))
-  }, [sessionId, fileId, col])
+    const controller = new AbortController()
+    fetch(`${API}/data/${sessionId}/${fileId}/column/${encodeURIComponent(col)}`, {
+      signal: controller.signal,
+    })
+      .then(async response => {
+        if (!response.ok) throw new Error(`Column details failed (${response.status})`)
+        return response.json()
+      })
+      .then(detail => setResult({ key: requestKey, detail, error: null }))
+      .catch(e => {
+        if (e.name !== 'AbortError') setResult({ key: requestKey, detail: null, error: e.message })
+      })
+    return () => controller.abort()
+  }, [sessionId, fileId, col, requestKey])
 
   if (!col) return null
+
+  const currentResult = result.key === requestKey ? result : { detail: null, error: null }
+  const detail = currentResult.detail
+  const loading = result.key !== requestKey
 
   return (
     <div className="col-detail-panel">
@@ -37,6 +49,7 @@ export default function ColumnDetailPanel({ sessionId, fileId, col, onClose }) {
         <button className="col-detail-close" onClick={onClose}>✕</button>
       </div>
       {loading && <div className="col-detail-loading">Loading…</div>}
+      {currentResult.error && <div className="global-error">{currentResult.error}</div>}
       {detail && !loading && (
         <div className="col-detail-body">
           <div className="col-stat-row"><span>Type</span><span>{detail.type}</span></div>

@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { fetchData, editFileCells } from '../api.js'
 import ColumnDetailPanel from './ColumnDetailPanel.jsx'
 
-export const FILTER_OPS = [
+const FILTER_OPS = [
   { value: 'contains',    label: 'contains' },
   { value: '=',           label: '=' },
   { value: '!=',          label: '≠' },
@@ -15,9 +15,9 @@ export const FILTER_OPS = [
   { value: 'is_null',     label: 'is empty' },
   { value: 'not_null',    label: 'not empty' },
 ]
-export const NO_VAL_OPS = new Set(['is_null', 'not_null'])
+const NO_VAL_OPS = new Set(['is_null', 'not_null'])
 
-export default function DataTable({ sessionId, fileId, version, onEdited }) {
+export default function DataTable({ sessionId, fileId, onEdited }) {
   const [offset, setOffset]         = useState(0)
   const [sortBy, setSortBy]         = useState('')
   const [sortDir, setSortDir]       = useState('asc')
@@ -33,45 +33,18 @@ export default function DataTable({ sessionId, fileId, version, onEdited }) {
   const [pendingEdits, setPendingEdits] = useState(new Map())  // key → {row, col, value}
   const [saving, setSaving]         = useState(false)
   const [saveError, setSaveError]   = useState(null)
-  const prevFileIdRef               = useRef(null)
-  const prevVersionRef              = useRef(null)
   const LIMIT = 100
 
   useEffect(() => {
     if (!fileId || !sessionId) return
 
-    let fetchOffset = offset
-    let fetchSortBy = sortBy
-    let fetchSortDir = sortDir
-
-    // Reset all state when switching files or when version changes (data was updated)
-    if (fileId !== prevFileIdRef.current || version !== prevVersionRef.current) {
-      prevFileIdRef.current = fileId
-      prevVersionRef.current = version
-      fetchOffset = 0
-      fetchSortBy = ''
-      fetchSortDir = 'asc'
-      setOffset(0)
-      setSortBy('')
-      setSortDir('asc')
-      setFilterCol('')
-      setFilterOp('contains')
-      setFilterVal('')
-      setPendingFilter({col: '', val: '', op: 'contains'})
-      setSelectedCol(null)
-      setData(null)
-      setPendingEdits(new Map())
-      setEditingCell(null)
-      setSaveError(null)
-    }
-
     let cancelled = false
     setLoading(true)
-    fetchData(sessionId, fileId, { offset: fetchOffset, limit: LIMIT, sortBy: fetchSortBy, sortDir: fetchSortDir, filterCol: pendingFilter.col, filterVal: pendingFilter.val, filterOp: pendingFilter.op })
+    fetchData(sessionId, fileId, { offset, limit: LIMIT, sortBy, sortDir, filterCol: pendingFilter.col, filterVal: pendingFilter.val, filterOp: pendingFilter.op })
       .then(d => { if (!cancelled) { setData(d); setLoading(false) } })
       .catch(e => { if (!cancelled) { setData({ error: e.message }); setLoading(false) } })
     return () => { cancelled = true }
-  }, [fileId, version, offset, sortBy, sortDir, pendingFilter])
+  }, [sessionId, fileId, offset, sortBy, sortDir, pendingFilter])
 
   function handleSort(col) {
     if (sortBy === col) {

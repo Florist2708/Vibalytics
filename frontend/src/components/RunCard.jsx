@@ -6,12 +6,9 @@ import ContextSection from './ContextSection.jsx'
 import ReproSection from './ReproSection.jsx'
 import RunProvenance from './RunProvenance.jsx'
 import ProposalDiff from './ProposalDiff.jsx'
+import { scrollToRun } from '../utils.js'
 
-export function scrollToRun(runId) {
-  document.getElementById(`run-${runId}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-}
-
-export default function RunCard({ run, proposals, rejectedProposals, onEditCode, onAcceptProposal, onRejectProposal, onRestoreProposal, onSaveWorkflow, onRerun, streaming, parentRun, childRuns, files, onPackageDetails }) {
+export default function RunCard({ run, proposals, rejectedProposals, onEditCode, onAcceptProposal, onRejectProposal, onRestoreProposal, onSaveWorkflow, onRerun, streaming, parentRun, childRuns, files }) {
   const [showCode, setShowCode] = useState(true)
   const [showAnalysis, setShowAnalysis] = useState(false)
   const [localCode, setLocalCode] = useState(null)

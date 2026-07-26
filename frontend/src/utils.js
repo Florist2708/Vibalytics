@@ -6,6 +6,10 @@ export function stripCodeBlocks(text) {
   return s.replace(/\n{3,}/g, '\n\n').trim()
 }
 
+export function scrollToRun(runId) {
+  document.getElementById(`run-${runId}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
 export function makeSuggestions(file) {
   const cols    = Object.entries(file.schema)
   const numCols = cols.filter(([, t]) => t === 'numeric' || t === 'integer')

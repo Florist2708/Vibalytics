@@ -63,7 +63,6 @@ export default function FilePanel({
               key={f.name}
               file={f}
               sessionId={sessionId}
-              workspaceId={workspaceId}
               active={!inactiveFiles.has(f.name)}
               onToggleActive={() => onToggleActive(f.name)}
               onSuggest={onSuggest}

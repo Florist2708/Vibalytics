@@ -92,7 +92,6 @@ class _Job:
     run_id:     str
     status:     str           # "running" | "done" | "error"
     events:     list = _dc_field(default_factory=list)  # raw SSE strings
-    created_at: float = _dc_field(default_factory=time.monotonic)
 
 _jobs: dict[str, _Job] = {}
 
@@ -116,13 +115,37 @@ def _is_streamable(line: str) -> bool:
     return True
 
 
-async def _with_stream_flag(session, gen):
-    """Wrap any SSE async generator: set session.streaming for its lifetime."""
+def _positive_timeout(value, default: float = 60.0) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return default
+    return timeout if timeout > 0 else default
+
+
+def _reserve_stream(session) -> None:
+    """Atomically reserve a workspace before creating a streaming response."""
+    if session.streaming:
+        raise HTTPException(
+            409,
+            "A run is already active in this workspace. Wait for it to finish.",
+        )
     session.streaming = True
+
+
+async def _with_stream_flag(session, gen):
+    """Release a pre-reserved workspace and restore any hidden data on exit."""
     try:
         async for chunk in gen:
             yield chunk
     finally:
+        # A cancelled or failed stream may exit before its normal restore path.
+        # Reloading only missing variables makes this a cheap no-op on success.
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, session.ensure_files_loaded)
+        except Exception:
+            pass
         session.streaming = False
 
 
@@ -439,6 +462,7 @@ async def _analyze(s, req: ChatRequest, config: dict, pre_run_id: str | None = N
 
     task      = req.message
     agent_cmd = config.get("command", "")
+    execution_timeout = _positive_timeout(config.get("timeout"), 60.0)
 
     # Use caller-specified active files, or all files in workspace.
     all_files    = db.get_files(s.workspace_id)
@@ -572,7 +596,9 @@ async def _analyze(s, req: ChatRequest, config: dict, pre_run_id: str | None = N
 
     # ── 4. Execute code (with real-time output streaming) ─────────────────
     yield t(f"Executing {language.upper()} code…")
-    out_stream, r_future = await _execute_streaming(s.r, code, 60.0, loop)
+    out_stream, r_future = await _execute_streaming(
+        s.r, code, execution_timeout, loop,
+    )
     streamed_output = False
     async for line in out_stream:
         yield sse("output_chunk", line)
@@ -640,7 +666,9 @@ async def _analyze(s, req: ChatRequest, config: dict, pre_run_id: str | None = N
             db.update_run(run_id, code=code)
             yield sse("code", code)
             yield t(f"Executing fixed {language.upper()} code…")
-            out_stream2, r_future2 = await _execute_streaming(s.r, code, 60.0, loop)
+            out_stream2, r_future2 = await _execute_streaming(
+                s.r, code, execution_timeout, loop,
+            )
             async for line in out_stream2:
                 yield sse("output_chunk", line)
                 streamed_output = True
@@ -782,6 +810,7 @@ async def chat_stream(req: ChatRequest):
     if not s:
         raise HTTPException(status_code=404, detail="Session not found. Upload data first.")
     config = load_config()
+    _reserve_stream(s)
     return StreamingResponse(_with_stream_flag(s, _analyze(s, req, config)),
                              media_type="text/event-stream")
 
@@ -799,45 +828,60 @@ async def chat_background(req: ChatRequest):
     s = store.get(req.session_id)
     if not s:
         raise HTTPException(404, "Session not found. Upload data first.")
-    if s.streaming:
-        raise HTTPException(409, "A run is already active in this workspace. Wait for it to finish.")
+    _reserve_stream(s)
 
-    config   = load_config()
-    loop     = asyncio.get_event_loop()
+    try:
+        config = load_config()
+        loop = asyncio.get_event_loop()
 
-    # Pre-create the run so we can return run_id before the task starts.
-    await loop.run_in_executor(None, s.ensure_files_loaded)
+        # Pre-create the run so we can return run_id before the task starts.
+        await loop.run_in_executor(None, s.ensure_files_loaded)
 
-    agent_cmd  = config.get("command", "")
-    all_files  = db.get_files(s.workspace_id)
-    all_vars   = [f["var_name"] for f in all_files]
-    act_files  = req.active_files if req.active_files is not None else all_vars
-    file_by_var = {f["var_name"]: f for f in all_files}
-    afv = {v: file_by_var[v].get("current_version_seq") or 1 for v in act_files if v in file_by_var}
+        agent_cmd = config.get("command", "")
+        all_files = db.get_files(s.workspace_id)
+        all_vars = [f["var_name"] for f in all_files]
+        act_files = req.active_files if req.active_files is not None else all_vars
+        file_by_var = {f["var_name"]: f for f in all_files}
+        afv = {
+            v: file_by_var[v].get("current_version_seq") or 1
+            for v in act_files if v in file_by_var
+        }
 
-    ws_record = db.get_workspace(s.workspace_id)
-    language  = (ws_record.get("language") if ws_record else None) or config.get("language", "r")
-    language  = language.lower()
-    store.ensure_language(s, language)
+        ws_record = db.get_workspace(s.workspace_id)
+        language = (
+            (ws_record.get("language") if ws_record else None)
+            or config.get("language", "r")
+        ).lower()
+        store.ensure_language(s, language)
 
-    run_id = db.create_run(s.workspace_id, req.message, agent_cmd, act_files,
-                           active_file_versions=afv, language=language,
-                           job_status="running")
+        run_id = db.create_run(
+            s.workspace_id,
+            req.message,
+            agent_cmd,
+            act_files,
+            active_file_versions=afv,
+            language=language,
+            job_status="running",
+        )
 
-    job = _Job(run_id=run_id, status="running")
-    _jobs[run_id] = job
+        job = _Job(run_id=run_id, status="running")
+        _jobs[run_id] = job
+    except Exception:
+        s.streaming = False
+        raise
 
     async def _bg_task():
-        s.streaming = True
         try:
-            async for event_str in _analyze(s, req, config, pre_run_id=run_id):
+            async for event_str in _with_stream_flag(
+                s, _analyze(s, req, config, pre_run_id=run_id),
+            ):
                 job.events.append(event_str)
         except Exception as e:
             job.status = "error"
             job.events.append(sse("error", str(e)))
             job.events.append(sse("done", json.dumps({"success": False})))
+            db.update_run(run_id, error=str(e), success=0)
         finally:
-            s.streaming = False
             if job.status != "error":
                 # Use DB success field as authoritative source — _analyze() sets it
                 # before yielding done, so it's already written when we reach here.
@@ -847,8 +891,16 @@ async def chat_background(req: ChatRequest):
                 else:
                     job.status = "done"
             db.update_run(run_id, job_status=job.status)
+            # Completed jobs are durable in SQLite; keeping base64 plots and table
+            # HTML in RAM after completion only duplicates that data.
+            _jobs.pop(run_id, None)
 
-    asyncio.create_task(_bg_task())
+    try:
+        asyncio.create_task(_bg_task())
+    except Exception:
+        _jobs.pop(run_id, None)
+        s.streaming = False
+        raise
     return {"run_id": run_id}
 
 
@@ -915,6 +967,8 @@ async def stream_run_events(run_id: str):
             steps = trace if isinstance(trace, list) else json.loads(trace)
             for step in steps:
                 yield sse("trace", step)
+        if run.get("agent_text"):
+            yield sse("text", run["agent_text"])
         if run.get("code"):
             yield sse("code", run["code"])
         if run.get("output"):
@@ -954,7 +1008,8 @@ async def stream_run_events(run_id: str):
 
 async def _execute_code_sse(s, run_id: str, code: str,
                             active_files: list[str] | None = None,
-                            language: str = "r"):
+                            language: str = "r",
+                            timeout: float = 60.0):
     """
     Async generator: load files → execute code → stream results → persist.
     Used by both /run/:id/rerun and /workflows/:id/run.
@@ -1001,7 +1056,10 @@ async def _execute_code_sse(s, run_id: str, code: str,
 
     yield t(f"Executing {language.upper()} code…")
     start_ms = time.monotonic()
-    r_result = await loop.run_in_executor(None, s.r.execute, code)
+    r_result = await loop.run_in_executor(
+        None,
+        lambda: s.r.execute(code, timeout),
+    )
 
     if r_result["output"]:
         yield sse("output", r_result["output"])
@@ -1093,7 +1151,7 @@ def patch_workspace(workspace_id: str, req: PatchWorkspaceRequest):
         lang = req.language.lower()
         if lang not in ("r", "python"):
             raise HTTPException(400, "language must be 'r' or 'python'")
-        active = store.get(workspace_id)
+        active = store.get_active(workspace_id)
         if active and active.streaming:
             raise HTTPException(409, "A run is currently streaming — wait for it to finish before changing language.")
         db.set_workspace_language(workspace_id, lang)
@@ -1112,6 +1170,7 @@ def patch_run(run_id: str, req: PatchRunRequest):
 
 class RerunRequest(BaseModel):
     session_id: str
+    code: str | None = None
 
 
 @app.post("/run/{run_id}/rerun")
@@ -1119,43 +1178,61 @@ async def rerun(run_id: str, req: RerunRequest):
     parent_run = db.get_run(run_id)
     if not parent_run:
         raise HTTPException(404, "Run not found")
+    if parent_run["workspace_id"] != req.session_id:
+        raise HTTPException(404, "Run not found in this workspace")
     s = store.get(req.session_id)
     if not s:
         raise HTTPException(404, "Session not found")
 
-    code = parent_run["edited_code"] or parent_run["code"]
+    code = req.code if req.code is not None else (
+        parent_run["edited_code"] or parent_run["code"]
+    )
     if not code:
         raise HTTPException(400, "No code to run")
 
-    # Create a child run linked to the parent — capture current version IDs at rerun time
-    new_version  = (parent_run.get("version") or 1) + 1
-    rerun_files  = db.get_files(parent_run["workspace_id"])
-    file_by_var  = {f["var_name"]: f for f in rerun_files}
-    afv = {
-        v: file_by_var[v].get("current_version_seq") or 1
-        for v in parent_run["active_files"] if v in file_by_var
-    }
-    parent_language = parent_run.get("language") or "r"
-    new_run_id  = db.create_run(
-        parent_run["workspace_id"],
-        parent_run["prompt"],
-        parent_run.get("agent", ""),
-        parent_run["active_files"],
-        parent_run_id=run_id,
-        version=new_version,
-        code=code,
-        active_file_versions=afv,
-        language=parent_language,
-    )
+    _reserve_stream(s)
+    try:
+        # Create a child run linked to the parent — capture current versions now.
+        new_version = (parent_run.get("version") or 1) + 1
+        rerun_files = db.get_files(parent_run["workspace_id"])
+        file_by_var = {f["var_name"]: f for f in rerun_files}
+        afv = {
+            v: file_by_var[v].get("current_version_seq") or 1
+            for v in parent_run["active_files"] if v in file_by_var
+        }
+        parent_language = parent_run.get("language") or "r"
+        new_run_id = db.create_run(
+            parent_run["workspace_id"],
+            parent_run["prompt"],
+            parent_run.get("agent", ""),
+            parent_run["active_files"],
+            parent_run_id=run_id,
+            version=new_version,
+            code=code,
+            active_file_versions=afv,
+            language=parent_language,
+        )
 
-    store.ensure_language(s, parent_language)
-
-    return StreamingResponse(
-        _with_stream_flag(s, _execute_code_sse(s, new_run_id, code,
-                          active_files=parent_run.get("active_files"),
-                          language=parent_language)),
-        media_type="text/event-stream",
-    )
+        store.ensure_language(s, parent_language)
+        execution_timeout = _positive_timeout(load_config().get("timeout"), 60.0)
+        response = StreamingResponse(
+            _with_stream_flag(
+                s,
+                _execute_code_sse(
+                    s,
+                    new_run_id,
+                    code,
+                    active_files=parent_run.get("active_files"),
+                    language=parent_language,
+                    timeout=execution_timeout,
+                ),
+            ),
+            media_type="text/event-stream",
+        )
+    except Exception:
+        s.streaming = False
+        raise
+    return response
 
 
 # ── Agent config endpoints ────────────────────────────────────────────────────
@@ -1286,7 +1363,7 @@ def get_context(session_id: str):
 
 @app.delete("/history/{session_id}")
 def clear_history(session_id: str):
-    if not store.get(session_id):
+    if not db.get_workspace(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
     with db.get_db() as con:
         con.execute("DELETE FROM messages WHERE workspace_id=?", (session_id,))
@@ -2086,8 +2163,10 @@ async def delete_file(workspace_id: str, file_id: str):
     if not file_rec or file_rec["workspace_id"] != workspace_id:
         raise HTTPException(404, "File not found")
     # Remove from live R session
-    s = store.get(workspace_id)
+    s = store.get_active(workspace_id)
     if s:
+        if s.streaming:
+            raise HTTPException(409, "Wait for the active run before removing data.")
         s.r.drop_file(file_rec["var_name"])
         s.loaded_vars.discard(file_rec["var_name"])
     db.archive_file(file_id)
@@ -2096,14 +2175,17 @@ async def delete_file(workspace_id: str, file_id: str):
 
 
 @app.post("/workspace/{workspace_id}/file/{file_id}/restore")
-async def restore_file(workspace_id: str, file_id: str, session_id: str):
+async def restore_file(workspace_id: str, file_id: str):
     """Restore an archived file back into the active workspace."""
     file_rec = db.get_file(file_id)
     if not file_rec or file_rec["workspace_id"] != workspace_id:
         raise HTTPException(404, "File not found")
+    active = store.get_active(workspace_id)
+    if active and active.streaming:
+        raise HTTPException(409, "Wait for the active run before restoring data.")
     db.restore_file(file_id)
     # Reload in R
-    s = store.get(session_id)
+    s = active or store.get(workspace_id)
     if s:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, s.r.load_file, file_rec["file_path"], file_rec["var_name"])
@@ -2119,8 +2201,10 @@ async def hard_delete_file(workspace_id: str, file_id: str):
     file_rec = db.get_file(file_id)
     if not file_rec or file_rec["workspace_id"] != workspace_id:
         raise HTTPException(404, "File not found")
-    s = store.get(workspace_id)
+    s = store.get_active(workspace_id)
     if s:
+        if s.streaming:
+            raise HTTPException(409, "Wait for the active run before removing data.")
         s.r.drop_file(file_rec["var_name"])
         s.loaded_vars.discard(file_rec["var_name"])
     try:
@@ -2374,25 +2458,47 @@ async def run_workflow(workflow_id: str, req: RerunRequest):
         if missing:
             raise HTTPException(400, f"Missing datasets: {', '.join(missing)}")
 
-    wf_files    = db.get_files(s.workspace_id)
-    wf_vars     = [f["var_name"] for f in wf_files]
-    wf_afv      = {f["var_name"]: f.get("current_version_seq") or 1 for f in wf_files}
-    wf_ws = db.get_workspace(s.workspace_id)
-    wf_language = ((wf_ws.get("language") if wf_ws else None) or load_config().get("language", "r")).lower()
-    store.ensure_language(s, wf_language)
-    run_id = db.create_run(
-        s.workspace_id,
-        f"[workflow] {wf['name']}",
-        "",
-        wf_vars,
-        active_file_versions=wf_afv,
-        language=wf_language,
-    )
-    return StreamingResponse(
-        _with_stream_flag(s, _execute_code_sse(s, run_id, wf["code"], active_files=wf_vars,
-                          language=wf_language)),
-        media_type="text/event-stream",
-    )
+    _reserve_stream(s)
+    try:
+        config = load_config()
+        wf_files = db.get_files(s.workspace_id)
+        wf_vars = [f["var_name"] for f in wf_files]
+        wf_afv = {
+            f["var_name"]: f.get("current_version_seq") or 1
+            for f in wf_files
+        }
+        wf_ws = db.get_workspace(s.workspace_id)
+        wf_language = (
+            (wf_ws.get("language") if wf_ws else None)
+            or config.get("language", "r")
+        ).lower()
+        store.ensure_language(s, wf_language)
+        run_id = db.create_run(
+            s.workspace_id,
+            f"[workflow] {wf['name']}",
+            "",
+            wf_vars,
+            active_file_versions=wf_afv,
+            language=wf_language,
+        )
+        response = StreamingResponse(
+            _with_stream_flag(
+                s,
+                _execute_code_sse(
+                    s,
+                    run_id,
+                    wf["code"],
+                    active_files=wf_vars,
+                    language=wf_language,
+                    timeout=_positive_timeout(config.get("timeout"), 60.0),
+                ),
+            ),
+            media_type="text/event-stream",
+        )
+    except Exception:
+        s.streaming = False
+        raise
+    return response
 
 
 # ── Versioning ─────────────────────────────────────────────────────────────────
@@ -3199,9 +3305,11 @@ def cleanup_chat(workspace_id: str):
 @app.post("/workspace/{workspace_id}/cleanup/archived_files")
 def cleanup_archived_files(workspace_id: str):
     # Remove from live session too
-    s = store.get(workspace_id)
+    s = store.get_active(workspace_id)
     archived = db.get_files(workspace_id, include_archived=True)
     if s:
+        if s.streaming:
+            raise HTTPException(409, "Wait for the active run before cleaning data.")
         for f in archived:
             if f.get("archived_at"):
                 s.r.drop_file(f["var_name"])
@@ -3230,9 +3338,11 @@ def cleanup_run_history(workspace_id: str):
 
 @app.delete("/workspace/{workspace_id}")
 def delete_workspace_endpoint(workspace_id: str):
-    s = store.get(workspace_id)
-    if s:
-        s.close()
+    if not db.get_workspace(workspace_id):
+        raise HTTPException(404, "Workspace not found")
+    s = store.get_active(workspace_id)
+    if s and s.streaming:
+        raise HTTPException(409, "Stop the active run before deleting this workspace.")
     store.delete(workspace_id)
     db.delete_workspace(workspace_id)
     # Remove workspace directory from FILES_DIR
@@ -3245,7 +3355,7 @@ def delete_workspace_endpoint(workspace_id: str):
 @app.post("/workspace/{workspace_id}/stop")
 def stop_workspace_run(workspace_id: str):
     """Signal the currently-running agent to stop immediately."""
-    s = store.get(workspace_id)
+    s = store.get_active(workspace_id)
     if s:
         s.get_abort_event().set()
     return {"ok": True}
